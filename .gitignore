@@ -34,6 +34,9 @@ volumes/
 .DS_Store
 *.log
 
+# Local screenshots (may contain personal data from ingested documents)
+screenshots/
+
 # Local AI tooling configs (not part of the app)
 .claude/
 .github/

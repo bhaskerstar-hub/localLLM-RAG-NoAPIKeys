@@ -191,3 +191,7 @@ Set `LLM_PROVIDER=anthropic` (with `ANTHROPIC_API_KEY`) or
 `LLM_PROVIDER=openai` (with `OPENAI_API_KEY`) and restart the backend.
 Embeddings stay on the local HuggingFace model regardless, so existing
 ingested documents remain searchable without re-ingestion.
+
+## License
+
+MIT - see [LICENSE](LICENSE).
