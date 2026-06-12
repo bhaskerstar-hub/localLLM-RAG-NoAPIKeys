@@ -1,0 +1,225 @@
+# =====================================================================
+# Enterprise RAG Platform - Docker Compose
+#
+# Provisions the full stack:
+#   - `backend`  (FastAPI + LangChain RAG API, port 8100)
+#   - `frontend` (Next.js UI, port 3100)
+#   - Self-hosted Langfuse v3 observability stack (Postgres, ClickHouse,
+#     Redis, MinIO, langfuse-worker, langfuse-web)
+#
+# All Langfuse backing services are internal-only (no host port mappings) so
+# they don't collide with the native Postgres already running on 5432.
+# Only the Langfuse web UI is published, on host port 3300.
+#
+# `backend` reaches the host's Ollama daemon via host.docker.internal, so no
+# extra LLM container is needed (set LLM_PROVIDER=ollama, the default).
+#
+# The Langfuse stack is gated behind the "langfuse" Compose profile so a
+# plain `docker compose up` only builds/starts the lightweight `backend` and
+# `frontend` services.
+#
+# Quick start (app only, no observability):
+#   1. cp .env.example .env
+#   2. docker compose up -d --build
+#   3. Open http://localhost:3100 for the app and http://localhost:8100/docs
+#      for the API.
+#
+# Quick start (with Langfuse observability):
+#   1. cp .env.example .env
+#   2. Generate secrets and paste them into .env:
+#        openssl rand -hex 32   # -> LANGFUSE_NEXTAUTH_SECRET, LANGFUSE_ENCRYPTION_KEY,
+#                                #    LANGFUSE_SALT, and the *_PASSWORD vars
+#   3. docker compose --profile langfuse up -d --build
+#   4. Open http://localhost:3300 and sign in with LANGFUSE_INIT_USER_EMAIL /
+#      LANGFUSE_INIT_USER_PASSWORD. The org/project/API keys in
+#      LANGFUSE_INIT_* are auto-provisioned on first boot.
+#   5. Copy LANGFUSE_INIT_PROJECT_PUBLIC_KEY / LANGFUSE_INIT_PROJECT_SECRET_KEY
+#      into LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY, set ENABLE_LANGFUSE=true,
+#      and restart the backend: docker compose up -d --build backend
+# =====================================================================
+
+x-langfuse-env: &langfuse-env
+  DATABASE_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD}@postgres:5432/postgres
+  SALT: ${LANGFUSE_SALT}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+  TELEMETRY_ENABLED: "false"
+
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD}
+
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+  LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
+  LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
+  LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID}
+  LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME}
+  LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+  LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+  LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+  LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
+  LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+
+services:
+  # --- Application services ----------------------------------------------
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Reach the host's Ollama daemon and, if enabled, the Langfuse
+      # stack's internal service name/port.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      LANGFUSE_HOST: http://langfuse-web:3000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8100:8000"
+    volumes:
+      - backend_data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8100}
+    restart: unless-stopped
+    ports:
+      - "3100:3000"
+    depends_on:
+      - backend
+
+  # --- Langfuse backing services (internal only, "langfuse" profile) -----
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    profiles: ["langfuse"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    restart: unless-stopped
+    profiles: ["langfuse"]
+    environment:
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: default
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 -O - http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["langfuse"]
+    command: ["redis-server", "--requirepass", "${LANGFUSE_REDIS_PASSWORD}"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LANGFUSE_REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    profiles: ["langfuse"]
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server /data --address ":9000" --console-address ":9001"'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9091:9001" # MinIO console (debugging only)
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Langfuse application -----------------------------------------------
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    restart: unless-stopped
+    profiles: ["langfuse"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *langfuse-env
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    restart: unless-stopped
+    profiles: ["langfuse"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      langfuse-worker:
+        condition: service_started
+    ports:
+      - "3300:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: http://localhost:3300
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+
+volumes:
+  backend_data:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:

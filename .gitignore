@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Backend data (vectorstore, uploads, sqlite db)
+backend/data/chroma/
+backend/data/uploads/
+backend/data/*.db
+backend/data/*.sqlite3
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+*.tsbuildinfo
+next-env.d.ts
+
+# Env files
+.env
+.env.local
+.env.*.local
+frontend/.env*
+
+# Langfuse / docker volumes
+volumes/
+
+# OS / editor
+.DS_Store
+*.log
+
+# Local AI tooling configs (not part of the app)
+.claude/
+.github/
+CLAUDE.md
+frontend/CLAUDE.md
+frontend/AGENTS.md
